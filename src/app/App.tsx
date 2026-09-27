@@ -218,7 +218,7 @@ function Gameplay({ board, sound, onSound, onEnd, onMenu }: { board: GeneratedBo
   </main>;
 }
 
-function Results({ board, found, score, onReplay, onNew, onMenu }: { board: GeneratedBoard; found: FoundWord[]; score: number; onReplay: () => void; onNew: () => void; onMenu: () => void }) {
+function Results({ board, found, score, onReplay, onMenu }: { board: GeneratedBoard; found: FoundWord[]; score: number; onReplay: () => void; onMenu: () => void }) {
   const [missedOpen, setMissedOpen] = useState(false);
   const foundSet = new Set(found.map((item) => item.word));
   const missed = board.words.filter((word) => !foundSet.has(word)).sort((a, b) => b.length - a.length || a.localeCompare(b));
@@ -226,7 +226,7 @@ function Results({ board, found, score, onReplay, onNew, onMenu }: { board: Gene
   const best = [...found].sort((a, b) => b.score - a.score)[0]?.word ?? "—";
   const percent = board.words.length ? Math.round(found.length / board.words.length * 100) : 0;
   return <main className="results-screen">
-    <header className="results-header"><Brand compact/><button className="text-button" onClick={onMenu}>Main menu</button></header>
+    <header className="results-header"><Brand compact/></header>
     <section className="results-wrap">
       <div className="results-hero"><div className="trophy"><Trophy/></div><div><span className="eyebrow">Round complete</span><h1>Nice searching.</h1><p>You uncovered {found.length} of {board.words.length} possible words.</p></div></div>
       <div className="result-score-card"><span>Final score</span><strong>{score.toLocaleString()}</strong><small>Top {Math.max(1, 100 - percent)}% of this board explored</small></div>
@@ -237,7 +237,7 @@ function Results({ board, found, score, onReplay, onNew, onMenu }: { board: Gene
         <section className="result-list-card"><div className="result-list-heading"><div><span>Your words</span><strong>{found.length}</strong></div><small>Sorted by score</small></div>{found.length ? <div className="result-words">{[...found].sort((a,b) => b.score - a.score).map((item) => <div key={item.word}><span>{item.word}</span><small>+{item.score}</small></div>)}</div> : <div className="empty-result">No words this time. The next board is waiting.</div>}</section>
         <section className="missed-card"><button onClick={() => setMissedOpen((open) => !open)} aria-expanded={missedOpen}><div><span>Words you missed</span><small>{missed.length} waiting to be discovered</small></div><ChevronDown className={missedOpen ? "is-open" : ""}/></button>{missedOpen && <div className="missed-list">{missed.map((word) => <span key={word}>{word}</span>)}</div>}</section>
       </div>
-      <div className="result-actions"><button className="primary-button" onClick={onNew}><span>New board</span><span className="button-arrow">↗</span></button><button className="secondary-button" onClick={onReplay}><RotateCcw size={17}/> Play again</button></div>
+      <div className="result-actions"><button className="primary-button" onClick={onMenu}><span>Main menu</span><span className="button-arrow">↗</span></button><button className="secondary-button" onClick={onReplay}><RotateCcw size={17}/> Play again</button></div>
     </section>
   </main>;
 }
@@ -296,6 +296,6 @@ export function App() {
   if (screen === "loading") return <div className="loading-screen"><Brand/><div className="loader-grid">{"LEXIGRIDPLAYWORD".split("").map((letter, index) => <span key={index}>{letter}</span>)}</div><h1>Building your board…</h1><p>Searching for a lively mix of hidden words.</p></div>;
   if (screen === "countdown") return <div className="countdown-screen"><Brand compact/><div className="countdown-ring"><span key={countdown}>{countdown}</span></div><p>Get ready to trace</p></div>;
   if (screen === "playing" && board) return <Gameplay key={`${board.letters.join("")}-${stats.gamesPlayed}`} board={board} sound={sound} onSound={toggleSound} onEnd={finishGame} onMenu={() => setScreen("menu")}/>;
-  if (screen === "results" && board) return <Results board={board} found={found} score={totalScore} onReplay={beginCountdown} onNew={buildBoard} onMenu={() => setScreen("menu")}/>;
+  if (screen === "results" && board) return <Results board={board} found={found} score={totalScore} onReplay={beginCountdown} onMenu={() => setScreen("menu")}/>;
   return null;
 }
