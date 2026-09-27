@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BarChart3, ChevronDown, Grid2X2, Info, RotateCcw, Sparkles, Trophy, Volume2, VolumeX, X } from "lucide-react";
 import type { BoardSize, GameStats, GeneratedBoard } from "../game/types";
 import { areAdjacent, validatePath } from "../game/solver";
 import { scoreWord } from "../game/scoring";
 import { getRemainingSeconds } from "../game/timer";
+import { closestTileAtPoint, distanceSquared, firstTileCrossed, type Point, type TileGeometry } from "../game/inputPath";
 
 type Screen = "menu" | "loading" | "countdown" | "playing" | "results";
 type FoundWord = { word: string; score: number };
@@ -94,20 +95,47 @@ function Menu({ size, onSize, onStart, sound, onSound, stats }: {
   </main>;
 }
 
-function GameBoard({ board, selected, status, onStart, onMove, onEnd }: {
+type HitDebug = { tiles: TileGeometry[]; pointer: Point; chosen: number | null };
+
+function GameBoard({ board, selected, status, boardRef, debug, onStart, onMove, onEnd }: {
   board: GeneratedBoard; selected: number[]; status: "idle" | "valid" | "invalid";
+  boardRef: React.RefObject<HTMLDivElement | null>; debug: HitDebug | null;
   onStart: (index: number, event: React.PointerEvent) => void; onMove: (event: React.PointerEvent) => void; onEnd: () => void;
 }) {
   const selectedSet = new Set(selected);
-  const points = selected.map((index) => {
-    const row = Math.floor(index / board.size);
-    const col = index % board.size;
-    return `${((col + .5) / board.size) * 100},${((row + .5) / board.size) * 100}`;
-  }).join(" ");
-  return <div className={`letter-board board-${board.size} path-${status}`} style={{ "--size": board.size } as React.CSSProperties} onPointerMove={onMove} onPointerUp={onEnd} onPointerCancel={onEnd} onLostPointerCapture={onEnd}>
-    <svg className="path-layer" viewBox="0 0 100 100" preserveAspectRatio="none"><polyline points={points} vectorEffect="non-scaling-stroke"/></svg>
-    {board.letters.map((letter, index) => <button key={index} data-tile={index} aria-label={`Letter ${letter}, row ${Math.floor(index / board.size) + 1}, column ${(index % board.size) + 1}`} className={`letter-tile ${selectedSet.has(index) ? "is-selected" : ""}`} onPointerDown={(event) => onStart(index, event)}><span>{letter}</span></button>)}
-  </div>;
+  const [pathGeometry, setPathGeometry] = useState({ width: 1, height: 1, points: "" });
+
+  useLayoutEffect(() => {
+    const boardElement = boardRef.current;
+    if (!boardElement) return;
+    const measure = () => {
+      const boardRect = boardElement.getBoundingClientRect();
+      const overlayRect = boardElement.querySelector<SVGSVGElement>(".path-layer")?.getBoundingClientRect() ?? boardRect;
+      const points = selected.map((index) => {
+        const tile = boardElement.querySelector<HTMLElement>(`[data-tile="${index}"]`);
+        if (!tile) return "";
+        const rect = tile.getBoundingClientRect();
+        return `${rect.left + rect.width / 2 - overlayRect.left},${rect.top + rect.height / 2 - overlayRect.top}`;
+      }).filter(Boolean).join(" ");
+      setPathGeometry({ width: overlayRect.width, height: overlayRect.height, points });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(boardElement);
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
+  }, [boardRef, selected]);
+
+  return <>
+    <div ref={boardRef} className={`letter-board board-${board.size} path-${status}`} style={{ "--size": board.size } as React.CSSProperties} onPointerMove={onMove} onPointerUp={onEnd} onPointerCancel={onEnd} onLostPointerCapture={onEnd}>
+      <svg className="path-layer" viewBox={`0 0 ${pathGeometry.width} ${pathGeometry.height}`} preserveAspectRatio="none" aria-hidden="true"><polyline points={pathGeometry.points} vectorEffect="non-scaling-stroke"/></svg>
+      {board.letters.map((letter, index) => <button key={index} data-tile={index} aria-label={`Letter ${letter}, row ${Math.floor(index / board.size) + 1}, column ${(index % board.size) + 1}`} className={`letter-tile ${selectedSet.has(index) ? "is-selected" : ""}`} onPointerDown={(event) => onStart(index, event)}><span>{letter}</span></button>)}
+    </div>
+    {debug && <div className="hit-debug" aria-hidden="true">
+      {debug.tiles.map((tile) => <span key={tile.index} className={`hit-debug-zone ${debug.chosen === tile.index ? "is-chosen" : ""}`} style={{ left: tile.center.x - tile.radius, top: tile.center.y - tile.radius, width: tile.radius * 2, height: tile.radius * 2 }}><i/></span>)}
+      <span className="hit-debug-pointer" style={{ left: debug.pointer.x, top: debug.pointer.y }}/>
+    </div>}
+  </>;
 }
 
 function Gameplay({ board, sound, onSound, onEnd, onMenu }: { board: GeneratedBoard; sound: boolean; onSound: () => void; onEnd: (words: FoundWord[]) => void; onMenu: () => void }) {
@@ -119,6 +147,12 @@ function Gameplay({ board, sound, onSound, onEnd, onMenu }: { board: GeneratedBo
   const startedAt = useRef(Date.now());
   const active = useRef(false);
   const foundRef = useRef<FoundWord[]>([]);
+  const selectedRef = useRef<number[]>([]);
+  const boardRef = useRef<HTMLDivElement>(null);
+  const previousPointRef = useRef<Point | null>(null);
+  const pendingCandidateRef = useRef<{ index: number; samples: number } | null>(null);
+  const debugEnabled = useMemo(() => new URLSearchParams(window.location.search).get("debugHitAreas") === "1", []);
+  const [hitDebug, setHitDebug] = useState<HitDebug | null>(null);
   const possible = useMemo(() => new Set(board.words), [board.words]);
   const playSound = useSound(sound);
   const score = found.reduce((sum, item) => sum + item.score, 0);
@@ -146,51 +180,116 @@ function Gameplay({ board, sound, onSound, onEnd, onMenu }: { board: GeneratedBo
 
   const currentWord = selected.map((index) => board.letters[index]).join("");
 
-  const addTile = (index: number) => {
-    setSelected((path) => {
-      if (path.includes(index)) return path;
-      if (path.length && !areAdjacent(path[path.length - 1]!, index, board.size)) return path;
-      return [...path, index];
+  const tileGeometries = () => {
+    if (!boardRef.current) return [];
+    return [...boardRef.current.querySelectorAll<HTMLElement>("[data-tile]")].map((tile) => {
+      const rect = tile.getBoundingClientRect();
+      return { index: Number(tile.dataset.tile), center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }, radius: Math.min(rect.width, rect.height) * 0.4 };
     });
+  };
+
+  const eligibleGeometries = (tiles: TileGeometry[]) => {
+    const path = selectedRef.current;
+    const last = path[path.length - 1];
+    if (last === undefined) return [];
+    return tiles.filter((tile) => !path.includes(tile.index) && areAdjacent(last, tile.index, board.size));
+  };
+
+  const addTile = (index: number) => {
+    const path = selectedRef.current;
+    if (path.includes(index) || (path.length && !areAdjacent(path[path.length - 1]!, index, board.size))) return false;
+    const next = [...path, index];
+    selectedRef.current = next;
+    setSelected(next);
+    pendingCandidateRef.current = null;
+    return true;
+  };
+
+  const processPoint = (point: Point) => {
+    const allTiles = tileGeometries();
+    let segmentStart = previousPointRef.current ?? point;
+    let chosen: number | null = null;
+
+    // A smaller swept radius is the hysteresis band: quick, intentional passes
+    // register, while a line that only clips a tile's outer edge does not.
+    for (let step = 0; step < 4; step += 1) {
+      const eligible = eligibleGeometries(allTiles);
+      const hit = firstTileCrossed(segmentStart, point, eligible, 0.85);
+      if (!hit || !addTile(hit.tile.index)) break;
+      chosen = hit.tile.index;
+      const progress = Math.min(1, hit.t + 0.002);
+      segmentStart = {
+        x: segmentStart.x + (point.x - segmentStart.x) * progress,
+        y: segmentStart.y + (point.y - segmentStart.y) * progress,
+      };
+    }
+
+    const eligible = eligibleGeometries(allTiles);
+    const candidate = closestTileAtPoint(point, eligible);
+    if (candidate) {
+      const deepInside = distanceSquared(point, candidate.center) <= (candidate.radius * 0.75) ** 2;
+      const pending = pendingCandidateRef.current;
+      const samples = pending?.index === candidate.index ? pending.samples + 1 : 1;
+      pendingCandidateRef.current = { index: candidate.index, samples };
+      if ((deepInside || samples >= 2) && addTile(candidate.index)) chosen = candidate.index;
+    } else {
+      pendingCandidateRef.current = null;
+    }
+
+    previousPointRef.current = point;
+    if (debugEnabled) setHitDebug({ tiles: allTiles, pointer: point, chosen });
   };
 
   const startPath = (index: number, event: React.PointerEvent) => {
     event.preventDefault();
     active.current = true;
-    event.currentTarget.parentElement?.setPointerCapture(event.pointerId);
+    boardRef.current?.setPointerCapture(event.pointerId);
+    selectedRef.current = [index];
     setSelected([index]);
     setPathStatus("idle");
+    const point = { x: event.clientX, y: event.clientY };
+    previousPointRef.current = point;
+    pendingCandidateRef.current = null;
+    if (debugEnabled) setHitDebug({ tiles: tileGeometries(), pointer: point, chosen: index });
   };
 
   const movePath = (event: React.PointerEvent) => {
     if (!active.current) return;
     event.preventDefault();
-    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-tile]");
-    const index = Number(target?.dataset.tile);
-    if (Number.isInteger(index)) addTile(index);
+    const nativeEvent = event.nativeEvent;
+    const coalesced = nativeEvent.getCoalescedEvents?.() ?? [];
+    const samples = coalesced.length ? coalesced : [nativeEvent];
+    for (const sample of samples) processPoint({ x: sample.clientX, y: sample.clientY });
+    const last = samples[samples.length - 1];
+    if (!last || last.clientX !== nativeEvent.clientX || last.clientY !== nativeEvent.clientY) processPoint({ x: nativeEvent.clientX, y: nativeEvent.clientY });
   };
 
   const finishPath = () => {
     if (!active.current) return;
     active.current = false;
-    const word = currentWord.toLowerCase();
+    previousPointRef.current = null;
+    pendingCandidateRef.current = null;
+    const completedPath = selectedRef.current;
+    const word = completedPath.map((index) => board.letters[index]).join("").toLowerCase();
     let message = "Not a word";
     if (word.length < 3) message = "Too short";
-    else if (!validatePath(selected, board.size)) message = "Invalid path";
-    else if (found.some((item) => item.word === word)) message = "Already found";
+    else if (!validatePath(completedPath, board.size)) message = "Invalid path";
+    else if (foundRef.current.some((item) => item.word === word)) message = "Already found";
     else if (possible.has(word)) {
       const points = scoreWord(word);
-      setFound((items) => [{ word, score: points }, ...items]);
+      const nextFound = [{ word, score: points }, ...foundRef.current];
+      foundRef.current = nextFound;
+      setFound(nextFound);
       setPathStatus("valid");
       setFeedback({ text: word.toUpperCase(), kind: "valid", points });
       playSound("valid");
-      window.setTimeout(() => { setSelected([]); setPathStatus("idle"); setFeedback(null); }, 380);
+      window.setTimeout(() => { selectedRef.current = []; setSelected([]); setPathStatus("idle"); setFeedback(null); }, 380);
       return;
     }
     setPathStatus("invalid");
     setFeedback({ text: message, kind: "invalid" });
     playSound("invalid");
-    window.setTimeout(() => { setSelected([]); setPathStatus("idle"); setFeedback(null); }, 380);
+    window.setTimeout(() => { selectedRef.current = []; setSelected([]); setPathStatus("idle"); setFeedback(null); }, 380);
   };
 
   return <main className="game-screen">
@@ -208,7 +307,7 @@ function Gameplay({ board, sound, onSound, onEnd, onMenu }: { board: GeneratedBo
           <span>{feedback?.text ?? (currentWord || "Trace a word")}</span>
           {feedback?.points && <b>+{feedback.points}</b>}
         </div>
-        <GameBoard board={board} selected={selected} status={pathStatus} onStart={startPath} onMove={movePath} onEnd={finishPath}/>
+        <GameBoard board={board} selected={selected} status={pathStatus} boardRef={boardRef} debug={debugEnabled ? hitDebug : null} onStart={startPath} onMove={movePath} onEnd={finishPath}/>
       </section>
       <aside className="found-panel">
         <div className="found-heading"><div><span className="panel-label">Found words</span><strong>{found.length}</strong></div><Sparkles size={18}/></div>
